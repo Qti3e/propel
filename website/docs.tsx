@@ -15,7 +15,14 @@
 // tslint:disable:variable-name
 import { h } from "preact";
 import { GlobalHeader } from "./common";
-import * as nb from "./nb";
+import { VM } from "./vm";
+import { StandaloneCell } from "./cell";
+
+const sandbox = new VM();
+
+function cell(src) {
+  return <StandaloneCell code={ src } />;
+}
 
 export interface DocEntry {
   kind: "class" | "method" | "property";

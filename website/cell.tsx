@@ -15,6 +15,8 @@
 
 import { h, Component } from "preact";
 import { CodeMirrorComponent } from "./codemirror";
+import { VM, createRPCHandler } from "./vm";
+import { delay } from "../src/util";
 import { OutputHandlerDOM } from "../src/output_handler";
 
 export interface CellProps {
@@ -24,20 +26,18 @@ export interface CellProps {
   onChange?: (code: string) => void;
   onFocus?: () => void;
   onBlur?: () => void;
-  goTo?: (id: number, force?: boolean) => void;
-  id?: number;
-  outputHandler?: OutputHandlerDOM;
+  goTo?: (id: number | string, force?: boolean) => void;
+  id?: number | string;
 
   focused?: boolean;
   status?: null | "running" | "updating";
 
   code: string;
-  outputDiv: Element;
+  outputDiv: JSX.Element;
 }
 
 export class Cell extends Component<CellProps, {}> {
   cm: CodeMirrorComponent;
-  private outputHandler: OutputHandlerDOM;
 
   clickedRun() {
     if (this.props.onRun) this.props.onRun();
@@ -83,18 +83,19 @@ export class Cell extends Component<CellProps, {}> {
 
   focus() {
     this.cm.focus();
-    if (this.props.goTo) this.props.goTo(this.props.id);
   }
 
   blur() {
     this.cm.blur();
-    if (!this.props.focused) return;
-    if (this.props.goTo) this.props.goTo(null);
   }
 
-  // TODO This should be removed in future.
-  getOutputHandler() {
-    return this.outputHandler;
+  componentWillReceiveProps(nextProps) {
+    if (nextProps.focused !== this.props.focused) {
+      if (nextProps.focused) this.focus();
+      else this.blur();
+    }
+    // TODO
+    return true;
   }
 
   render() {
@@ -120,7 +121,7 @@ export class Cell extends Component<CellProps, {}> {
       );
     }
 
-    const { id, outputDiv, code, status } = this.props;
+    const { id, outputDiv, code, status, focused} = this.props;
     const inputClass = [ "input" ];
     if (status) {
       inputClass.push("notebook-cell-" + status);
@@ -128,7 +129,7 @@ export class Cell extends Component<CellProps, {}> {
 
     return (
       <div
-        class="notebook-cell"
+        class={ "notebook-cell" + (focused ? "notebook-cell-focused" : "")}
         id={ `cell${id}` } >
         <div
           class={ inputClass.join(" ") } >
@@ -153,4 +154,143 @@ export class Cell extends Component<CellProps, {}> {
       </div>
     );
   }
+}
+
+// All codes below are for doc's cell.
+
+let nextCellId: number = 0;
+ 
+const prerenderedOutputs = new Map<number, string>();
+
+export function registerPrerenderedOutput(output) {
+  const cellId = Number(output.id.replace("output", ""));
+  prerenderedOutputs.set(cellId, output.innerHTML);
+}
+
+const cellExecuteQueue: StandaloneCell[] = [];
+
+export async function drainExecuteQueue() {
+  while (cellExecuteQueue.length > 0) {
+    const cell = cellExecuteQueue.shift();
+    await cell.run();
+  }
+}
+
+interface SCellProps {
+  code: string;
+  vm?: VM;
+}
+
+interface SCellState {
+  code: string;
+  focused: boolean;
+  status: null | "running" | "updating";
+}
+
+export class StandaloneCell extends Component<SCellProps, SCellState> {
+  readonly id: number;
+  outputDiv: JSX.Element;
+  output: Element;
+  outputHTML?: string;
+  outputHandler: OutputHandlerDOM;
+  vm: VM;
+  destroyVM: boolean;
+
+  constructor(props) {
+    super(props);
+    this.id = nextCellId++;
+    this.state = {
+      code: props.code,
+      focused: false,
+      status: null
+    };
+    if (prerenderedOutputs.has(this.id)) {
+      this.outputHTML = prerenderedOutputs.get(this.id);
+    }
+    if (this.props.vm) this.vm = this.props.vm;
+  }
+
+  componentWillMount() {
+    if (this.outputHTML === null) {
+      cellExecuteQueue.push(this);
+    }
+  }
+
+  componentWillUnMount() {
+    if (this.destroyVM) {
+      this.vm.destroy();
+      this.vm = null;
+    }
+  }
+
+  handleCodeChange(newCode: string) {
+    this.setState({ code: newCode });
+  }
+
+  toggleFocus(focused: boolean) {
+    this.setState({ focused });
+  }
+
+  clearOutput() {
+    this.output.innerHTML = "";
+  }
+
+  async run() {
+    this.clearOutput();
+    this.setState({ status: "running" });
+    // TODO(@qti3e) I think it's better to wrap code in a function.
+    // to prevent possible bugs with having duplicate var names in
+    // docs.
+    await this.vm.exec(this.state.code, this.id);
+    this.setState({ status: "updating" });
+    await delay(100);
+    this.setState({ status: null });
+  }
+
+  initOutputDiv() {
+    if (this.outputDiv) return;
+    // If supplied outputHTML, use that in the output div.
+    const outputDivAttr = {
+      "class": "output",
+      "id": "output" + this.id,
+      "ref": (ref => {
+        this.output = ref;
+        this.outputHandler = new OutputHandlerDOM(ref);
+        if (!this.vm) {
+          const rpcHandler = createRPCHandler(this.outputHandler);
+          this.vm = new VM(rpcHandler);
+          this.destroyVM = true;
+        }
+      }),
+    };
+    if (this.outputHTML) {
+      outputDivAttr["dangerouslySetInnerHTML"] = {
+        __html: this.outputHTML,
+      };
+    }
+    this.outputDiv = <div { ...outputDivAttr } />;
+  }
+
+  render() {
+    this.initOutputDiv();
+
+    return (
+      <Cell
+        id={ this.id }
+        code={ this.state.code }
+        onChange={ this.handleCodeChange.bind(this) }
+        outputDiv={ this.outputDiv }
+        onFocus={ () => this.toggleFocus(true) }
+        onBlur={ () => this.toggleFocus(false) }
+        focused={ this.state.focused }
+        onRun={ this.run.bind(this) }
+        status={ this.state.status }
+      />
+    );
+  }
+}
+
+export function resetCells() {
+  nextCellId = 0;
+  prerenderedOutputs.clear();
 }
